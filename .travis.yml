@@ -1,7 +1,6 @@
 sudo: required
 services:
   - docker
-language: node_js
 env:
   global:
     - PROJECT=tigerbin
