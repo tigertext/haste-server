@@ -6,4 +6,4 @@ env:
   global:
     - PROJECT=tigerbin
 script:
-  - docker build -t ${PROJECT}/${TRAVIS_BUILD_NUMBER}
+  - docker build -t ${PROJECT}/${TRAVIS_BUILD_NUMBER} .
