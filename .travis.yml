@@ -1,0 +1,9 @@
+sudo: required
+services:
+  - docker
+language: node_js
+env:
+  global:
+    - PROJECT=tigerbin
+script:
+  - docker build -t ${PROJECT}/${TRAVIS_BUILD_NUMBER}
