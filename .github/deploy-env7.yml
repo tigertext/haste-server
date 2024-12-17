@@ -1,0 +1,108 @@
+name: deploy-env7
+
+on:
+  workflow_dispatch:
+    inputs:
+      ConfigRepoBranch:
+        type: string
+        default: 'main'
+        description: 'Input the branch of config repo'
+        required: true
+
+permissions:
+      id-token: write
+      contents: read
+env:
+  ECR_REGISTRY: 057480205022.dkr.ecr.us-east-1.amazonaws.com
+  NAMESPACE: tigerbin
+  ECS_CLUSTER: infra-tools
+  NETWORK_ENV: env7
+  BRANCH_NAME: ${{ github.ref }}
+  ECR_REGISTRY_ID: "057480205022"
+  CONFIG_REPO_BRANCH: ${{ github.event.inputs.ConfigRepoBranch }}
+  AWS_ACCOUNT: "928712562848"
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build-image.outputs.image }}
+    steps:
+    - uses: actions/checkout@v2
+    - name: AWS Dev Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-region: us-east-1
+        role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/github-actions
+        role-duration-seconds: 1200
+        role-session-name: DevSession
+    - name: Get Configs
+      uses: actions/checkout@v2
+      with:
+        repository: tigertext/${{ env.NAMESPACE }}-config
+        ref: ${{ env.CONFIG_REPO_REF }}
+        token: ${{ secrets.GIT_RO_ACCESS_TOKEN }}
+        path: ${{ env.NAMESPACE }}-config
+    - name: Set env
+      run: |
+        echo "SHA7=${GITHUB_SHA::7}" >> $GITHUB_ENV
+        echo "BRANCH_NAME=${GITHUB_REF#refs/heads/}" >> $GITHUB_ENV
+        echo "SAFE_BRANCH_NAME=`echo ${GITHUB_REF#refs/heads/} | tr / -`" >> $GITHUB_ENV
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      run: |
+        SHA7=${GITHUB_SHA::7}
+        SAFE_BRANCH_NAME=`echo ${BRANCH_NAME#refs/heads/} | tr / -`
+
+        set +e
+        IMAGE_META="$( aws ecr describe-images --registry-id $ECR_REGISTRY_ID --repository-name=$NAMESPACE --image-ids imageTag=$SHA7  2> /dev/null )"
+        RESULT=$?
+        set -e
+        if [[ $RESULT == 0 ]]; then
+            echo "Existing image tag found: $NAMESPACE:$SHA7"
+        else
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker pull $ECR_REGISTRY/$NAMESPACE:$SAFE_BRANCH_NAME || true
+          docker build --cache-from=$ECR_REGISTRY/$NAMESPACE:$SAFE_BRANCH_NAME -t $ECR_REGISTRY/$NAMESPACE:$SAFE_BRANCH_NAME -t $ECR_REGISTRY/$NAMESPACE:$SHA7 .
+          docker push $ECR_REGISTRY/$NAMESPACE:$SAFE_BRANCH_NAME
+          docker push $ECR_REGISTRY/$NAMESPACE:$SHA7
+          BRANCH_NAME=`echo ${BRANCH_NAME#refs/heads/}`
+          echo "::set-output name=image::$ECR_REGISTRY/$NAMESPACE:$SHA7"
+        fi
+
+        echo "::set-output name=image::$ECR_REGISTRY/$NAMESPACE:$SHA7-$CONFIG_REPO_SHA7"
+  ecs-deployment:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    steps:
+    - name: AWS Dev Credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-region: us-east-1
+        role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT }}:role/github-actions
+        role-duration-seconds: 1200
+        role-session-name: DevSession
+    - name: get configs
+      uses: actions/checkout@v2
+      with:
+        repository: tigertext/${{ env.NAMESPACE }}-config
+        ref: main
+        token: ${{ secrets.GIT_RO_ACCESS_TOKEN }}
+        path: config
+    - name: render ECS task definition non-prod
+      id: render-task-definition
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: config/task-definitions/${{ env.NETWORK_ENV }}-task-definition.json
+        container-name: ${{ env.NAMESPACE }}-${{ env.NETWORK_ENV }}
+        image: ${{ needs.docker-build.outputs.image }}
+    - name: Deploy to ECS non-prod
+      id: deploy-task-definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.render-task-definition.outputs.task-definition }}
+        service: ${{ env.NAMESPACE }}-${{ env.NETWORK_ENV }}
+        cluster: ${{ env.ECS_CLUSTER }}-${{ env.NETWORK_ENV }}
+        wait-for-service-stability: true
+    - name: Output task-definition ARN
+      run: echo "${{ steps.deploy-task-definition.outputs.task-definition-arn }}"
